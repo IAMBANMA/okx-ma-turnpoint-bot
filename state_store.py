@@ -16,7 +16,7 @@ def _default_state():
         "positions": {},       # instId -> {side, entry_price, sz_margin, ord_id, ts}
         "last_signal_ts": {},  # instId -> 已处理过的最后信号 K 线 ts(防重启重复交易)
         "paused": False,       # 总熔断/杀开关
-        "total_loss": 0.0,
+        "realized_pnl": 0.0,   # 累计已实现盈亏(USDT,估算),用于总亏损熔断
     }
 
 

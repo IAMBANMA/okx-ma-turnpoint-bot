@@ -110,8 +110,9 @@ class TradingEngine:
             return True, f"开{'多' if side == 'long' else '空'}成功 ordId={ord_id} sl={sl}"
         return False, f"开仓失败 code={res.get('code') if isinstance(res, dict) else '?'} msg={res.get('msg') if isinstance(res, dict) else res}"
 
-    def _close(self, inst_id, side):
-        """平仓 side='long'/'short'。返回 (ok, msg)。"""
+    def _close(self, inst_id, side, close_price=None):
+        """平仓 side='long'/'short'。close_price 用于估算已实现盈亏(熔断用)。返回 (ok, msg)。"""
+        entry = self.state["positions"].get(inst_id, {}).get("entry_price")
         if config.DRY_RUN:
             self.state["positions"].pop(inst_id, None)
             state_store.save_state(self.state)
@@ -122,9 +123,22 @@ class TradingEngine:
             return False, f"平仓异常: {e}"
         if okx_cli.ok(res):
             self.state["positions"].pop(inst_id, None)
-            state_store.save_state(self.state)
+            if close_price and entry:
+                self._record_pnl(side, entry, close_price)
+            else:
+                state_store.save_state(self.state)
             return True, f"平{'多' if side == 'long' else '空'}成功"
         return False, f"平仓失败 code={res.get('code')} msg={res.get('msg')}"
+
+    def _record_pnl(self, side, entry, close):
+        """估算一次平仓的已实现盈亏并累计;达到熔断阈值则暂停开仓。"""
+        notional = config.MARGIN_PER_TRADE * config.LEVERAGE
+        pnl = ((close - entry) / entry * notional) if side == "long" else ((entry - close) / entry * notional)
+        self.state["realized_pnl"] = round(self.state.get("realized_pnl", 0.0) + pnl, 4)
+        if self.state["realized_pnl"] <= -config.MAX_TOTAL_LOSS:
+            self.state["paused"] = True
+            notify.log_and_notify("熔断", f"累计已实现亏损 {self.state['realized_pnl']:.2f} USDT 达阈值 -{config.MAX_TOTAL_LOSS},已暂停开仓(需手动复位 paused)")
+        state_store.save_state(self.state)
 
     # ========== 风控护栏 ==========
     def _preflight_open(self, inst_id):
@@ -133,7 +147,38 @@ class TradingEngine:
         live = self.live_positions()
         if inst_id not in live and len(live) >= config.MAX_OPEN_POSITIONS:
             return False, f"已达最大持仓数 {config.MAX_OPEN_POSITIONS}"
+        # 余额检查:可用保证金 ≥ 每单保证金×1.2(读不到有效值则跳过,靠 OKX 下单失败兜底)
+        avail = self._available_margin()
+        if avail is not None and avail < config.MARGIN_PER_TRADE * 1.2:
+            return False, f"可用保证金不足 {avail:.2f} < {config.MARGIN_PER_TRADE * 1.2:.2f}"
         return True, ""
+
+    def _available_margin(self):
+        """尽力读取可用保证金(USDT/USDC),读不到有效值返回 None。"""
+        try:
+            res = okx_cli.get_balance()
+            items = _items(res)
+            if not items:
+                return None
+            top = items[0]
+            for key in ("availEq", "totalEq", "eq", "availBal", "cashBal"):
+                v = top.get(key)
+                if v not in (None, ""):
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        continue
+            for d in top.get("details") or []:
+                if d.get("ccy") in ("USDT", "USDC"):
+                    v = d.get("availBal") or d.get("cashBal") or d.get("eq")
+                    if v not in (None, ""):
+                        try:
+                            return float(v)
+                        except (TypeError, ValueError):
+                            continue
+        except okx_cli.OkxCliError:
+            pass
+        return None
 
     # ========== 信号处理 ==========
     def on_signals(self, inst_id, signals):
@@ -177,7 +222,7 @@ class TradingEngine:
         if live_side == want:
             return False, f"已持{'多' if want == 'long' else '空'}仓,同向不动"
         # 反向信号 → 平仓(可配置反手)
-        ok, msg = self._close(inst_id, live_side)
+        ok, msg = self._close(inst_id, live_side, close_price=sig.price)
         if ok and config.REVERSE_ON_SIGNAL:
             ok2, msg2 = self._open(inst_id, want, sig.price)
             return ok2, msg + " → 反手:" + msg2
@@ -218,7 +263,7 @@ class TradingEngine:
                     elif tp and price <= tp:
                         reason = "止盈"
                 if reason:
-                    ok, msg = self._close(inst_id, side)
+                    ok, msg = self._close(inst_id, side, close_price=price)
                     notify.log_and_notify(reason, f"{inst_id} {msg} 现价={price} avgPx={avg_px}",
                                           dedup_key=f"{reason}:{inst_id}")
         except okx_cli.OkxCliError as e:
