@@ -80,7 +80,14 @@ def ok(res):
 
 def _guard_ai_builder_code():
     if not config.AI_BUILDER_CODE:
-        raise OkxCliError("缺少 OKX_AI_BUILDER_CODE,拒绝下单(归因码是返佣生命线)")
+        if config.DEMO:
+            return  # 模拟盘验证下单链路允许空 code(订单不带归因)
+        raise OkxCliError("缺少 OKX_AI_BUILDER_CODE,拒绝实盘下单(归因码是返佣生命线)")
+
+
+def _builder_code_args():
+    """code 非空才注入 --aiBuilderCode(空 code 时下单不带归因,仅验证链路)。"""
+    return ["--aiBuilderCode", config.AI_BUILDER_CODE] if config.AI_BUILDER_CODE else []
 
 
 def _throttle():
@@ -104,8 +111,7 @@ def place_market(inst_id, side, *, sz, tgt_ccy="margin", pos_side=None,
             "--ordType", "market",
             "--sz", str(sz),
             "--tgtCcy", tgt_ccy,
-            "--tdMode", td_mode or config.TD_MODE,
-            "--aiBuilderCode", config.AI_BUILDER_CODE]
+            "--tdMode", td_mode or config.TD_MODE] + _builder_code_args()
     if pos_side:
         args += ["--posSide", pos_side]
     if sl_trigger_px is not None:
@@ -121,8 +127,7 @@ def close_position(inst_id, pos_side, td_mode=None):
     _throttle()
     args = ["swap", "close",
             "--instId", inst_id,
-            "--mgnMode", td_mode or config.TD_MODE,
-            "--aiBuilderCode", config.AI_BUILDER_CODE]
+            "--mgnMode", td_mode or config.TD_MODE] + _builder_code_args()
     if pos_side:
         args += ["--posSide", pos_side]
     return run_okx(args)
