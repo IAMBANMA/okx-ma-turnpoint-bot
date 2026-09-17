@@ -1,6 +1,10 @@
+<p align="center"><img src="logo.png" width="160" alt="logo"></p>
+
 # OKX 均线拐点自动交易机器人（OKX MA Turnpoint Bot）
 
 基于 **MA13/MA35 均线斜率拐点**的全自动交易机器人，接入 [OKX AI Builder Program](https://www.okx.com/zh-hans/help/ai-builder-program-integration-guide) 获得返佣归因（申请即 35%、最高 50%）。
+
+> **Logo 设计**取自「争鸣投资」：两条趋势线在中心交叉交锋（金=多/上行、蓝=空/下行），交点圆点 = 信号交汇点，深色圆角底沿用看板主题色。
 
 > ⚠️ **免责声明**：这是**全自动实盘交易**程序，可能造成资金损失。请在模拟盘充分验证后再考虑实盘，盈亏自负。本程序不构成任何投资建议。
 
