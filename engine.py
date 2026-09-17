@@ -5,10 +5,13 @@
 """
 import time
 
+import pandas as pd
+
 import config
 import market
 import notify
 import okx_cli
+import signal as signal_mod
 import state_store
 
 
@@ -74,6 +77,46 @@ class TradingEngine:
             return None
         return entry * (1 + config.TP_PCT) if side == "long" else entry * (1 - config.TP_PCT)
 
+    @staticmethod
+    def _calc_trail(best, side):
+        """追踪止损价:从极值 best 回撤 TRAIL_PCT。best=None 或 TRAIL_PCT<=0 返回 None。"""
+        if config.TRAIL_PCT <= 0 or not best:
+            return None
+        return best * (1 - config.TRAIL_PCT) if side == "long" else best * (1 + config.TRAIL_PCT)
+
+    def _live_price(self, inst_id):
+        """实时价(ticker last);失败返回 None。"""
+        try:
+            res = okx_cli.get_ticker(inst_id)
+            items = _items(res)
+            if items:
+                v = items[0].get("last") or items[0].get("lastPx")
+                if v not in (None, ""):
+                    return float(v)
+        except okx_cli.OkxCliError:
+            pass
+        return None
+
+    def _trend_filter(self, inst_id):
+        """大级别(默认 1h)趋势方向过滤:返回 'long'/'short'/None(无趋势或未启用)。
+        |大级别 MA35 斜率| > TREND_THRESHOLD 才算有趋势。"""
+        if not config.TREND_FILTER:
+            return None
+        try:
+            df = market.fetch_candles(inst_id, bar=config.TREND_BAR, limit=config.MA_LONG + 6)
+            if df is None or len(df) < config.MA_LONG + 2:
+                return None
+            slope = signal_mod.compute_ma_slope(df, config.MA_LONG, 1).iloc[-1]
+            if pd.isna(slope):
+                return None
+            if slope > config.TREND_THRESHOLD:
+                return "long"
+            if slope < -config.TREND_THRESHOLD:
+                return "short"
+            return None
+        except Exception:
+            return None
+
     # ========== 下单/平仓 ==========
     def _pos_side(self, side):
         """对冲模式需 posSide,净仓模式省略。"""
@@ -86,7 +129,7 @@ class TradingEngine:
         tp = self._calc_tp(ref_price, side)
         if config.DRY_RUN:
             self.state["positions"][inst_id] = {
-                "side": side, "entry_price": ref_price,
+                "side": side, "entry_price": ref_price, "best_price": ref_price,
                 "sz_margin": config.MARGIN_PER_TRADE, "ord_id": "dry",
                 "ts": int(time.time() * 1000),
             }
@@ -102,7 +145,7 @@ class TradingEngine:
             data = _items(res)
             ord_id = data[0].get("ordId") if data else None
             self.state["positions"][inst_id] = {
-                "side": side, "entry_price": ref_price,
+                "side": side, "entry_price": ref_price, "best_price": ref_price,
                 "sz_margin": config.MARGIN_PER_TRADE, "ord_id": ord_id,
                 "ts": int(time.time() * 1000),
             }
@@ -212,6 +255,10 @@ class TradingEngine:
         """根据交易所实时持仓 + 信号方向决定动作。"""
         want = "long" if sig.direction == "bottom" else "short"
         if live_side is None:
+            # 趋势过滤:大级别(默认 1h)方向相反时跳过开仓(只做顺趋势)
+            trend = self._trend_filter(inst_id)
+            if trend is not None and trend != want:
+                return False, f"趋势过滤:大级别{'多' if trend == 'long' else '空'}头,跳过{'开多' if want == 'long' else '开空'}"
             ok, msg = self._preflight_open(inst_id)
             if not ok:
                 return False, msg
@@ -228,10 +275,10 @@ class TradingEngine:
             return ok2, msg + " → 反手:" + msg2
         return ok, msg
 
-    # ========== 止损/TP 轮询兜底(方案 b) ==========
+    # ========== 止损/TP/追踪 轮询兜底(方案 b) ==========
     def poll_stop(self):
-        """程序端兜底:交易所端 SL 已挂(方案 a),这里兜 TP 与漏挂 SL 的场景。
-        以交易所 avgPx 为基准,现价越界即市价平仓。"""
+        """程序端兜底:交易所端 SL 已挂(方案 a),这里兜 TP、漏挂 SL,并做追踪止损(让利润奔跑)。
+        以交易所 avgPx 为基准、ticker 实时价为现价。"""
         if config.DRY_RUN:
             return
         try:
@@ -245,25 +292,43 @@ class TradingEngine:
                     continue
                 if not inst_id or not side or avg_px <= 0:
                     continue
-                df = market.fetch_candles(inst_id, bar="5m", limit=2)
-                if df is None or len(df) == 0:
+                price = self._live_price(inst_id)
+                if price is None or price <= 0:
                     continue
-                price = float(df.iloc[-1]["close"])
+                # 更新极值(追踪止损用):多仓记录最高价,空仓记录最低价
+                pos = self.state["positions"].get(inst_id) or {}
+                best = pos.get("best_price")
+                if best is None:
+                    best = price
+                elif side == "long":
+                    best = max(best, price)
+                else:
+                    best = min(best, price)
+                if best != pos.get("best_price"):
+                    pos["best_price"] = best
+                    self.state["positions"][inst_id] = pos
+                    state_store.save_state(self.state)
                 sl = self._calc_sl(avg_px, side)
                 tp = self._calc_tp(avg_px, side)
+                trail = self._calc_trail(best, side)
                 reason = None
                 if side == "long":
                     if sl and price <= sl:
                         reason = "硬止损"
                     elif tp and price >= tp:
                         reason = "止盈"
+                    elif trail and price <= trail:
+                        reason = "追踪止损"
                 else:
                     if sl and price >= sl:
                         reason = "硬止损"
                     elif tp and price <= tp:
                         reason = "止盈"
+                    elif trail and price >= trail:
+                        reason = "追踪止损"
                 if reason:
                     ok, msg = self._close(inst_id, side, close_price=price)
+                    state_store.save_state(self.state)
                     notify.log_and_notify(reason, f"{inst_id} {msg} 现价={price} avgPx={avg_px}",
                                           dedup_key=f"{reason}:{inst_id}")
         except okx_cli.OkxCliError as e:

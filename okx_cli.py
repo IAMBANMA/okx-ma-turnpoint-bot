@@ -159,6 +159,11 @@ def get_instrument(inst_id):
     return run_okx(["market", "instruments", "--instType", "SWAP", "--instId", inst_id], demo=False)
 
 
+def get_ticker(inst_id):
+    """实时行情 ticker(追踪止损/止盈用实时价)。demo=False。"""
+    return run_okx(["market", "ticker", inst_id], demo=False)
+
+
 def get_orders(inst_id=None, state="filled"):
     """订单列表(核对归因/成交)。"""
     args = ["swap", "orders"]

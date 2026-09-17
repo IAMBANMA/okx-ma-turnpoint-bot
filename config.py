@@ -75,9 +75,15 @@ LEVERAGE = _get_int("LEVERAGE", 3)
 TD_MODE = _get("TD_MODE", "cross")                        # cross 全仓 / isolated 逐仓
 SL_PCT = _get_float("SL_PCT", 0.02)                       # 硬止损百分比(2%)
 TP_PCT = _get_float("TP_PCT", 0.0)                        # 止盈百分比(0=关闭)
+TRAIL_PCT = _get_float("TRAIL_PCT", 0.015)                # 追踪止损回撤百分比(1.5%,从极值回撤此幅度离场)
 REVERSE_ON_SIGNAL = _get_bool("REVERSE_ON_SIGNAL", False)  # 反向信号是否反手
 MAX_OPEN_POSITIONS = _get_int("MAX_OPEN_POSITIONS", 3)
 MAX_TOTAL_LOSS = _get_float("MAX_TOTAL_LOSS", 300.0)      # 总亏损熔断阈值(USDT)
+
+# ===== 趋势过滤(大级别方向,只做顺趋势) =====
+TREND_FILTER = _get_bool("TREND_FILTER", True)            # 是否启用趋势过滤
+TREND_BAR = _get("TREND_BAR", "1H")                       # 过滤用的大级别周期
+TREND_THRESHOLD = _get_float("TREND_THRESHOLD", 0.02)     # 大级别 MA35 斜率阈值(%):|斜率|>此值才视为有趋势
 
 # ===== 扫描 =====
 SCAN_INTERVAL = _get_int("SCAN_INTERVAL", 10)
